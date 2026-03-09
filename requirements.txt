@@ -1,5 +1,7 @@
 streamlit
-akshare
+yfinance
 pandas
-pandas-ta
 plotly
+requests
+beautifulsoup4
+html5lib
