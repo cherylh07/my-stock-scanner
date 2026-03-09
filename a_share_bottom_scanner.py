@@ -19,58 +19,68 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 核心计算函数 (原生实现以减少依赖) ---
+# --- 2. 核心计算函数 ---
 
 def calculate_rsi(series, period=14):
-    """使用 pandas 原生计算 RSI，不依赖第三方库"""
+    """原生计算 RSI，完全不依赖第三方技术分析库"""
+    if len(series) < period:
+        return pd.Series([None] * len(series))
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+    # 避免除以零
+    rs = gain / loss.replace(0, 1e-9) 
     return 100 - (100 / (1 + rs))
 
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
-    """获取标普500成分股列表 (从维基百科)"""
+    """获取标普500成分股列表，带备选方案"""
     try:
-        # 增加 headers 模拟浏览器，防止被维基百科拦截
+        # 尝试从维基百科爬取
         table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
         df = table[0]
         return df['Symbol'].tolist()
-    except:
-        return ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "UNH", "JNJ", "V"]
+    except Exception as e:
+        # 如果 read_html 因为缺少库或网络问题失败，使用硬编码的 Top 50 热门美股作为备份
+        st.sidebar.warning("无法获取完整S&P500列表，已切换为热门美股备份。")
+        return [
+            "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "UNH", "JNJ", "V", 
+            "WMT", "PG", "MA", "HD", "CVX", "PFE", "ABV", "KO", "BAC", "PEP",
+            "COST", "TMO", "AVGO", "CSCO", "ACN", "ADBE", "LIN", "CRM", "DIS", "ABT",
+            "WFC", "DHR", "TXN", "INTC", "PM", "NEE", "VZ", "RTX", "AMGN", "HON",
+            "IBM", "LOW", "CAT", "GE", "QCOM", "INTU", "DE", "SPGI", "PLD", "GS"
+        ]
 
 def check_us_stock_strategy(ticker_symbol, ma_ratio, rsi_threshold):
     """
-    美股筛选逻辑：
-    1. 价格 < 250日均线 (年线) 的指定比例
-    2. RSI(14) < 阈值 (超卖)
-    3. 量比衡量近期成交活跃度
+    筛选逻辑实现：
+    1. 价格跌破年线指定比例
+    2. RSI超卖
+    3. 量比确认
     """
     try:
-        # 获取最近两年的数据以确保计算 MA250
+        # 增加重试机制
         ticker = yf.Ticker(ticker_symbol)
         df = ticker.history(period="2y")
         
-        if len(df) < 250:
+        if df is None or len(df) < 250:
             return None
             
-        # 计算指标 (使用原生 pandas)
+        # 计算指标
         df['MA250'] = df['Close'].rolling(window=250).mean()
         df['RSI'] = calculate_rsi(df['Close'], period=14)
         
         latest = df.iloc[-1]
-        
         close = latest['Close']
         ma250 = latest['MA250']
         rsi = latest['RSI']
         volume = latest['Volume']
-        avg_volume = df['Volume'].tail(20).mean() # 20日平均成交量
+        avg_volume = df['Volume'].tail(20).mean()
         
-        # 筛选条件判断
         if pd.isna(ma250) or pd.isna(rsi):
             return None
 
+        # 核心判断逻辑
         if (close < ma250 * ma_ratio) and (rsi < rsi_threshold):
             bias = (close - ma250) / ma250 * 100
             vol_ratio = volume / avg_volume if avg_volume > 0 else 0
@@ -84,19 +94,18 @@ def check_us_stock_strategy(ticker_symbol, ma_ratio, rsi_threshold):
                 '量比(20日)': round(vol_ratio, 2),
                 '成交量': int(volume)
             }
-        return None
     except:
-        return None
+        pass # 忽略单只股票获取失败
+    return None
 
 # --- 3. 侧边栏 ---
 
 st.sidebar.header("🇺🇸 美股筛选设置")
-
-scan_mode = st.sidebar.radio("选择扫描模式", ["标普500成份股", "自定义代码"])
+scan_mode = st.sidebar.radio("选择扫描范围", ["标普500成份股", "自定义代码"])
 
 if scan_mode == "自定义代码":
-    custom_tickers = st.sidebar.text_input("输入美股代码 (用逗号分隔)", "TSLA,AAPL,BABA,PDD,NIO")
-    ticker_list = [t.strip().upper() for t in custom_tickers.split(",")]
+    custom_tickers = st.sidebar.text_input("输入代码 (逗号分隔)", "TSLA,AAPL,BABA,PDD,NIO,XPEV")
+    ticker_list = [t.strip().upper() for t in custom_tickers.split(",") if t.strip()]
 else:
     ticker_list = get_sp500_tickers()
 
@@ -110,11 +119,11 @@ start_scan = st.sidebar.button("🚀 开始分析美股", use_container_width=Tr
 # --- 4. 主界面 ---
 
 st.title("🎯 美股底部反转筛选器")
-st.info("原理：在美股市场寻找处于**250日年线**下方、**RSI超卖**且具备成交量支撑的潜在反转标的。")
+st.info("说明：由于美股 API 限制，标普500全量扫描可能需要 3-5 分钟。")
 
 if start_scan:
     total = len(ticker_list)
-    st.subheader(f"📊 正在分析 {total} 只美股标的...")
+    st.subheader(f"📊 正在扫描 {total} 只美股...")
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -123,68 +132,56 @@ if start_scan:
     start_time = time.time()
     
     for i, symbol in enumerate(ticker_list):
-        # 处理部分代码带点的格式（如 BRK.B 需转为 BRK-B 才能被 yfinance 识别）
-        yf_symbol = symbol.replace('.', '-')
-        status_text.text(f"正在扫描: {symbol} ({i+1}/{total})")
+        yf_symbol = symbol.replace('.', '-') # 处理 BRK.B 类型代码
+        status_text.text(f"正在分析: {symbol} ({i+1}/{total})")
         
         res = check_us_stock_strategy(yf_symbol, ma_ratio, rsi_limit)
         if res:
-            res['代码'] = symbol # 恢复原始显示代码
+            res['代码'] = symbol
             results.append(res)
         
         progress_bar.progress((i + 1) / total)
-        if i % 10 == 0:
-            time.sleep(0.05)
+        # 适当休眠，避免被 Yahoo Finance 封锁
+        if i % 20 == 0:
+            time.sleep(0.1)
 
-    duration = round(time.time() - start_time, 1)
-    status_text.success(f"扫描完成！耗时 {duration} 秒。")
+    status_text.success(f"扫描完成！耗时 {round(time.time() - start_time, 1)} 秒。")
 
     if results:
         df_res = pd.DataFrame(results)
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("符合条件数", len(results))
-        c2.metric("平均超跌幅度", f"{round(df_res['乖离率%'].mean(), 2)}%")
-        with c3:
-            max_vol = df_res.sort_values('量比(20日)', ascending=False).iloc[0]['代码']
-            st.metric("相对放量之王", max_vol)
+        c1.metric("筛选结果", f"{len(results)} 只")
+        c2.metric("中位乖离率", f"{round(df_res['乖离率%'].median(), 2)}%")
+        c3.metric("最强量比", df_res.sort_values('量比(20日)', ascending=False).iloc[0]['代码'])
 
-        st.write("### 🔍 美股筛选结果清单")
-        df_res = df_res.sort_values('量比(20日)', ascending=False)
-        
+        st.write("### 🔍 筛选清单 (按量比排序)")
         st.dataframe(
-            df_res.style.background_gradient(subset=['量比(20日)'], cmap='YlGn')
-                       .background_gradient(subset=['乖离率%'], cmap='RdYlGn_r'),
+            df_res.sort_values('量比(20日)', ascending=False).style.format(precision=2),
             use_container_width=True,
             hide_index=True
         )
 
-        st.write("### 📈 乖离率与量比分布图")
+        # 分布图
         fig = go.Figure(data=[go.Scatter(
             x=df_res['乖离率%'], 
             y=df_res['量比(20日)'],
             mode='markers+text',
             text=df_res['代码'],
             textposition="top center",
-            marker=dict(size=df_res['RSI14'], color=df_res['RSI14'], colorscale='Viridis', showscale=True)
+            marker=dict(size=12, color=df_res['RSI14'], colorscale='Viridis', showscale=True)
         )])
-        fig.update_layout(
-            xaxis_title="乖离率 % (越小越跌过头)",
-            yaxis_title="量比 (相对于20日平均)",
-            template="plotly_white"
-        )
+        fig.update_layout(xaxis_title="乖离率 %", yaxis_title="量比", template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
         
         csv = df_res.to_csv(index=False).encode('utf_8_sig')
-        st.download_button("📥 下载结果 (CSV)", csv, "us_bottom_scan.csv", "text/csv")
-        
+        st.download_button("📥 下载数据 (CSV)", csv, "us_stocks_bottom.csv", "text/csv")
     else:
-        st.warning("☹️ 未找到符合条件的美股。可以尝试放宽筛选参数。")
+        st.warning("☹️ 当前参数下未找到符合条件的股票。")
 else:
     st.divider()
-    st.write("### 💡 使用小贴士")
+    st.write("### 💡 使用建议")
     st.markdown("""
-    - **乖离率**：美股跌破年线 20% 以上通常被视为严重的阶段性超跌。
-    - **RSI指标**：30 以下代表进入超卖区，数值越低反弹动能可能越大。
-    - **运行报错？**：如果部署失败，请确保你的 GitHub 中 `requirements.txt` 文件内容已按下方说明更新。
+    - **部署报错？** 请确保 GitHub 中的 `requirements.txt` 文件**仅包含文字**，没有隐藏的 `.txt` 后缀。
+    - **关于数据**：数据由 Yahoo Finance 提供，可能会有几分钟延迟。
     """)
