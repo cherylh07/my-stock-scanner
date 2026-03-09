@@ -49,16 +49,27 @@ def calculate_mfi(df, period=14):
 
 @st.cache_data(ttl=86400)
 def get_sp500_data():
-    """实时获取标普500成分股及其行业分类"""
+    """实时获取标普500成分股及其行业分类，增加对 lxml 缺失的处理"""
+    # 备选热门美股数据
+    backup_data = pd.DataFrame({
+        'Symbol': ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "BRK-B", "UNH", "JNJ", "V", "WMT", "JPM", "PG"],
+        'GICS Sector': ["Information Technology", "Information Technology", "Communication Services", "Consumer Discretionary", 
+                        "Consumer Discretionary", "Information Technology", "Communication Services", "Financials", 
+                        "Health Care", "Health Care", "Financials", "Consumer Staples", "Financials", "Consumer Staples"]
+    })
+    
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         tables = pd.read_html(url)
         df = tables[0]
-        # 返回代码和行业的字典映射
         return df[['Symbol', 'GICS Sector']]
+    except ImportError:
+        st.sidebar.error("⚠️ 运行环境缺少 'lxml' 库，无法抓取实时行业数据。")
+        st.sidebar.info("建议：在终端运行 `pip install lxml` 或在 requirements.txt 中添加 `lxml`。")
+        return backup_data
     except Exception as e:
-        st.error(f"无法获取行业数据: {e}")
-        return pd.DataFrame(columns=['Symbol', 'GICS Sector'])
+        st.sidebar.warning(f"无法在线获取行业数据，已启用备选列表。错误: {e}")
+        return backup_data
 
 def get_inst_holdings(ticker_symbol):
     """获取机构持仓比例 (用于最终确认)"""
@@ -71,7 +82,7 @@ def get_inst_holdings(ticker_symbol):
     except:
         return 0
 
-def check_stock_strategy(symbol, ma_ratio_threshold, rsi_threshold):
+def check_stock_strategy(symbol, ma_ratio_threshold, rsi_threshold, sector_map):
     """执行 3 大筛选逻辑"""
     try:
         ticker = yf.Ticker(symbol)
@@ -102,12 +113,11 @@ def check_stock_strategy(symbol, ma_ratio_threshold, rsi_threshold):
             
             if money_flow_active:
                 # 3. 机构动向 (通过 info 接口确认)
-                # 提示：由于 info 接口慢，只对符合前两项的股票查询
                 inst_percent = get_inst_holdings(symbol)
                 
                 return {
                     '代码': symbol,
-                    '行业': sector_map.get(symbol, "未知"),
+                    '行业': sector_map.get(symbol, "其他"),
                     '价格': round(close, 2),
                     '年线(MA250)': round(ma250, 2),
                     '乖离率%': round((close - ma250) / ma250 * 100, 2),
@@ -129,7 +139,7 @@ sector_map = dict(zip(sp500_df['Symbol'], sp500_df['GICS Sector']))
 st.sidebar.header("🔍 筛选条件设置")
 
 # 1. 行业筛选
-selected_sector = st.sidebar.selectbox("1. 选择行业板块", ["全选 (S&P 500)"] + sectors)
+selected_sector = st.sidebar.selectbox("1. 选择行业板块", ["全选 (当前列表)"] + sectors)
 
 # 2. 低位参数
 st.sidebar.subheader("2. 低位识别参数")
@@ -137,7 +147,7 @@ ma_limit = st.sidebar.slider("股价低于年线比例 (%)", 50, 100, 80, help="
 rsi_limit = st.sidebar.slider("RSI (14日) 阈值", 10, 50, 35)
 
 # 筛选代码列表
-if selected_sector == "全选 (S&P 500)":
+if selected_sector == "全选 (当前列表)":
     ticker_list = sp500_df['Symbol'].tolist()
 else:
     ticker_list = sp500_df[sp500_df['GICS Sector'] == selected_sector]['Symbol'].tolist()
@@ -163,14 +173,14 @@ if start_scan:
         yf_symbol = symbol.replace('.', '-')
         status_text.text(f"分析中 ({i+1}/{total}): {symbol}")
         
-        res = check_stock_strategy(yf_symbol, ma_limit/100.0, rsi_limit)
+        res = check_stock_strategy(yf_symbol, ma_limit/100.0, rsi_limit, sector_map)
         if res:
             res['代码'] = symbol
             results.append(res)
         
         progress_bar.progress((i + 1) / total)
         # 避免请求过快
-        if i % 20 == 0: time.sleep(0.05)
+        if i % 15 == 0: time.sleep(0.05)
 
     duration = round(time.time() - start_time, 1)
     status_text.success(f"扫描完成！耗时 {duration} 秒。")
